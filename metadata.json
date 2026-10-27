@@ -1,0 +1,6 @@
+{
+  "name": "slow studio - Motor de Animación Vectorial con IA",
+  "description": "Motor interactivo de animación vectorial estilo slow studio con IA, línea de tiempo, keyframes, agrupación, símbolos MovieClip con sub-animaciones y canvas interactivo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
