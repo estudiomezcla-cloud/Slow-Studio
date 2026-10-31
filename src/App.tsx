@@ -10,6 +10,10 @@ import {
   TweenType,
   EasingType,
   RegistrationPoint,
+  MotionPathData,
+  MediaAsset,
+  MediaFolder,
+  KeyframeSound,
 } from './types/flash';
 import { FlashAIChat } from './components/chat/FlashAIChat';
 import { FlashStage } from './components/stage/FlashStage';
@@ -17,11 +21,32 @@ import { FlashTimeline } from './components/timeline/FlashTimeline';
 import { FlashToolbox } from './components/toolbox/FlashToolbox';
 import { PropertiesPanel } from './components/panels/PropertiesPanel';
 import { LibraryPanel } from './components/panels/LibraryPanel';
+import { MediaPanel } from './components/panels/MediaPanel';
+import { MotionPathPanel } from './components/panels/MotionPathPanel';
+import { MediaManagerModal } from './components/modals/MediaManagerModal';
+import {
+  DEFAULT_MEDIA_FOLDERS,
+  DEFAULT_MEDIA_ASSETS,
+  playAssetAudio,
+} from './utils/mediaUtils';
 import { ActionScriptModal } from './components/modals/ActionScriptModal';
 import { FramePromptModal } from './components/modals/FramePromptModal';
 import { SymbolModal } from './components/modals/SymbolModal';
+import { SymbolManagerModal } from './components/modals/SymbolManagerModal';
 import { ExportModal } from './components/modals/ExportModal';
 import { ProjectSettingsModal, ProjectSettings } from './components/modals/ProjectSettingsModal';
+import { BackgroundLayerModal } from './components/modals/BackgroundLayerModal';
+import {
+  renameSymbolInDocument,
+  deleteSymbolFromDocument,
+  duplicateSymbolInDocument,
+  SymbolInstanceLocation,
+} from './utils/symbolUtils';
+import { getBackgroundPresetById, generateBackgroundElements } from './utils/backgroundPresets';
+import { getLayerElementsAtFrame } from './utils/interpolation';
+import { SplashScreen } from './components/common/SplashScreen';
+import { TopMenuBar } from './components/common/TopMenuBar';
+import { FloatingColorPicker, ColorTarget } from './components/common/FloatingColorPicker';
 import { playKeyframeAdd, playButtonClick, playTweenCreate } from './utils/audio';
 import {
   Folder,
@@ -334,6 +359,8 @@ const INITIAL_DOCUMENT: FlashDocument = {
       ],
     },
   ],
+  mediaFolders: DEFAULT_MEDIA_FOLDERS,
+  mediaAssets: DEFAULT_MEDIA_ASSETS,
 };
 
 export default function App() {
@@ -354,8 +381,10 @@ export default function App() {
   const [strokeColor, setStrokeColor] = useState<string>('#0f766e');
   const [strokeWidth, setStrokeWidth] = useState<number>(3);
 
-  // Side Panels (Properties vs Library)
-  const [activeSidePanel, setActiveSidePanel] = useState<'properties' | 'library' | 'none'>('properties');
+  // Side Panels (Properties vs Library vs Media)
+  const [activeSidePanel, setActiveSidePanel] = useState<'properties' | 'library' | 'media' | 'none'>('properties');
+  const [selectedMediaFolderId, setSelectedMediaFolderId] = useState<string | null>(null);
+  const [mediaManagerModalOpen, setMediaManagerModalOpen] = useState<boolean>(false);
 
   // Modals
   const [actionScriptModal, setActionScriptModal] = useState<{
@@ -373,12 +402,67 @@ export default function App() {
   }>({ isOpen: false, layerId: '', frame: 1, initialPrompt: '' });
 
   const [symbolModal, setSymbolModal] = useState<boolean>(false);
+  const [symbolManagerModalOpen, setSymbolManagerModalOpen] = useState<boolean>(false);
   const [exportModal, setExportModal] = useState<boolean>(false);
-  // Show New Document creation dialog when the app starts!
+  const [backgroundModalOpen, setBackgroundModalOpen] = useState<boolean>(false);
+  const [showSplash, setShowSplash] = useState<boolean>(true);
+  const [snapToGrid, setSnapToGrid] = useState<boolean>(false);
+  const [showGrid, setShowGrid] = useState<boolean>(false);
+  const [gridSize, setGridSize] = useState<number>(20);
+  const [isIsolatedMode, setIsIsolatedMode] = useState<boolean>(false);
+  const [isColorPickerOpen, setIsColorPickerOpen] = useState<boolean>(false);
+  const [colorPickerTarget, setColorPickerTarget] = useState<ColorTarget>('fill');
+  const [isMotionPathPanelOpen, setIsMotionPathPanelOpen] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // New Document creation dialog (opens right after splash or on demand)
   const [projectSettingsModal, setProjectSettingsModal] = useState<{ isOpen: boolean; isNew: boolean }>({
-    isOpen: true,
+    isOpen: false,
     isNew: true,
   });
+
+  const handleFinishSplash = () => {
+    setShowSplash(false);
+    setProjectSettingsModal({ isOpen: true, isNew: true });
+  };
+
+  const handleSaveSlowProject = () => {
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(doc, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', `${doc.title || 'proyecto'}.slow`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+  };
+
+  const handleOpenSlowProject = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target?.result as string);
+        if (parsed.scenes && parsed.width && parsed.height) {
+          setDoc(parsed);
+          setCurrentSceneId(parsed.scenes[0].id);
+          setCurrentSymbolId(null);
+          setCurrentFrame(1);
+          if (parsed.scenes[0].layers[0]) {
+            setSelectedLayerId(parsed.scenes[0].layers[0].id);
+          }
+        }
+      } catch (err) {
+        console.error('Error cargando archivo .slow:', err);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   // Active Scene layers or nested Symbol layers (MovieClip sub-animation!)
   const currentScene = doc.scenes.find((s) => s.id === currentSceneId) || doc.scenes[0];
@@ -388,6 +472,24 @@ export default function App() {
   // Selected layer & keyframe
   const selectedLayer = activeLayers.find((l) => l.id === selectedLayerId) || activeLayers[0];
   const activeKeyframe = selectedLayer?.keyframes.find((kf) => kf.frame === currentFrame) || null;
+
+  // Feature: Modo Aislamiento (Solo ver capa activa) - Auto-focus layer on element selection
+  const handleSelectElement = useCallback(
+    (elementId: string | null) => {
+      setSelectedElementId(elementId);
+      if (elementId) {
+        // Automatically focus the layer that owns the selected element
+        const foundLayer = activeLayers.find((layer) => {
+          const els = getLayerElementsAtFrame(layer, currentFrame);
+          return els.some((el) => el.id === elementId);
+        });
+        if (foundLayer && foundLayer.id !== selectedLayerId) {
+          setSelectedLayerId(foundLayer.id);
+        }
+      }
+    },
+    [activeLayers, currentFrame, selectedLayerId]
+  );
 
   // Animation playback timer
   const animFrameRef = useRef<number | null>(null);
@@ -411,6 +513,9 @@ export default function App() {
         setCurrentFrame((prev) => {
           for (const layer of activeLayers) {
             const kf = layer.keyframes.find((k) => k.frame === prev);
+            if (kf && kf.sound && kf.sound.url) {
+              playAssetAudio(kf.sound.url, kf.sound.volume ?? 1);
+            }
             if (kf && kf.actions) {
               if (kf.actions.includes('stop();')) {
                 setIsPlaying(false);
@@ -458,6 +563,35 @@ export default function App() {
       if (isModifier && e.key.toLowerCase() === 'g') {
         e.preventDefault();
         handleGroupSelected();
+        return;
+      }
+
+      if (!isModifier && e.key.toLowerCase() === 'g') {
+        setSnapToGrid((s) => !s);
+        return;
+      }
+
+      if (isModifier && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setProjectSettingsModal({ isOpen: true, isNew: true });
+        return;
+      }
+
+      if (isModifier && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSaveSlowProject();
+        return;
+      }
+
+      if (isModifier && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        handleOpenSlowProject();
+        return;
+      }
+
+      if (isModifier && e.shiftKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setBackgroundModalOpen(true);
         return;
       }
 
@@ -512,17 +646,33 @@ export default function App() {
         playKeyframeAdd();
       } else if (e.key === 'F8') {
         e.preventDefault();
-        setSymbolModal(true);
+        if (isModifier || e.shiftKey) {
+          setSymbolManagerModalOpen((v) => !v);
+        } else {
+          setSymbolModal(true);
+        }
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedElementId) {
           handleDeleteSelectedElement();
         }
+      } else if (e.key === 'Escape' && isIsolatedMode) {
+        e.preventDefault();
+        setIsIsolatedMode(false);
+      } else if (!isModifier && e.code === 'KeyI') {
+        e.preventDefault();
+        setIsIsolatedMode((v) => !v);
+      } else if (!isModifier && e.code === 'KeyP') {
+        e.preventDefault();
+        setIsColorPickerOpen((v) => !v);
+      } else if (!isModifier && e.code === 'KeyM') {
+        e.preventDefault();
+        setIsMotionPathPanelOpen((v) => !v);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [doc.totalFrames, selectedLayerId, currentFrame, selectedElementId, selectedLayer]);
+  }, [doc.totalFrames, selectedLayerId, currentFrame, selectedElementId, selectedLayer, isIsolatedMode]);
 
   // Layer Mutations
   const updateActiveLayers = useCallback(
@@ -554,6 +704,7 @@ export default function App() {
       visible: true,
       locked: false,
       color: ['#14b8a6', '#06b6d4', '#10b981', '#3b82f6', '#8b5cf6'][activeLayers.length % 5],
+      layerType: 'normal',
       keyframes: [
         {
           frame: 1,
@@ -563,6 +714,87 @@ export default function App() {
       ],
     };
     updateActiveLayers([...activeLayers, newLayer]);
+    setSelectedLayerId(newLayer.id);
+  };
+
+  const handleAddBackgroundLayer = (
+    presetId: string,
+    options: { placeAtBottom: boolean; autoLock: boolean; customColor?: string }
+  ) => {
+    const preset = getBackgroundPresetById(presetId);
+    const bgElements = generateBackgroundElements(presetId, doc.width, doc.height);
+
+    if (options.customColor && bgElements.length > 0) {
+      bgElements[0].fill = options.customColor;
+    }
+
+    const bgLayerName = preset ? `Fondo (${preset.name})` : `Capa de Fondo`;
+    const newBgLayer: Layer = {
+      id: `layer_bg_${Date.now()}`,
+      name: bgLayerName,
+      visible: true,
+      locked: options.autoLock ?? true,
+      color: '#0d9488',
+      layerType: 'background',
+      backgroundPresetId: presetId,
+      keyframes: [
+        {
+          frame: 1,
+          tweenType: 'none',
+          elements: bgElements,
+        },
+      ],
+    };
+
+    if (options.placeAtBottom) {
+      // Place at bottom (rendered first, behind foreground animations)
+      updateActiveLayers([newBgLayer, ...activeLayers]);
+    } else {
+      updateActiveLayers([...activeLayers, newBgLayer]);
+    }
+    setSelectedLayerId(newBgLayer.id);
+  };
+
+  const handleMoveLayerUp = (layerId: string) => {
+    const idx = activeLayers.findIndex((l) => l.id === layerId);
+    if (idx <= 0) return;
+    const reordered = [...activeLayers];
+    const temp = reordered[idx];
+    reordered[idx] = reordered[idx - 1];
+    reordered[idx - 1] = temp;
+    updateActiveLayers(reordered);
+  };
+
+  const handleMoveLayerDown = (layerId: string) => {
+    const idx = activeLayers.findIndex((l) => l.id === layerId);
+    if (idx < 0 || idx >= activeLayers.length - 1) return;
+    const reordered = [...activeLayers];
+    const temp = reordered[idx];
+    reordered[idx] = reordered[idx + 1];
+    reordered[idx + 1] = temp;
+    updateActiveLayers(reordered);
+  };
+
+  const handleDuplicateLayer = (layerId: string) => {
+    const layer = activeLayers.find((l) => l.id === layerId);
+    if (!layer) return;
+    const clonedKeyframes: Keyframe[] = layer.keyframes.map((kf) => ({
+      ...kf,
+      elements: kf.elements.map((el) => ({
+        ...el,
+        id: `${el.id}_dup_${Date.now()}`,
+      })),
+    }));
+    const newLayer: Layer = {
+      ...layer,
+      id: `layer_${Date.now()}`,
+      name: `${layer.name} (Copia)`,
+      keyframes: clonedKeyframes,
+    };
+    const idx = activeLayers.findIndex((l) => l.id === layerId);
+    const newLayers = [...activeLayers];
+    newLayers.splice(idx + 1, 0, newLayer);
+    updateActiveLayers(newLayers);
     setSelectedLayerId(newLayer.id);
   };
 
@@ -660,6 +892,19 @@ export default function App() {
     }
   };
 
+  const handleUpdateMotionPath = (path: MotionPathData, kfFrame: number) => {
+    if (!selectedLayer) return;
+    const kf = selectedLayer.keyframes.find((k) => k.frame === kfFrame);
+    if (kf) {
+      kf.motionPath = path;
+      if (!kf.motionPaths) kf.motionPaths = {};
+      if (selectedElementId) {
+        kf.motionPaths[selectedElementId] = path;
+      }
+      updateActiveLayers([...activeLayers]);
+    }
+  };
+
   // Element Updates
   const handleUpdateElement = (updated: FlashElement) => {
     if (!selectedLayer) return;
@@ -698,6 +943,32 @@ export default function App() {
       kf.elements = kf.elements.filter((e) => e.id !== selectedElementId);
       setSelectedElementId(null);
       updateActiveLayers([...activeLayers]);
+    }
+  };
+
+  const currentSelectedElement =
+    activeLayers
+      .flatMap((l) => l.keyframes.find((k) => k.frame === currentFrame)?.elements || [])
+      .find((e) => e.id === selectedElementId) || null;
+
+  const handleOpenColorPicker = (target: ColorTarget = 'fill') => {
+    setColorPickerTarget(target);
+    setIsColorPickerOpen(true);
+  };
+
+  const handleColorPickerChange = (newColor: string, target: ColorTarget) => {
+    if (target === 'fill') {
+      setPrimaryColor(newColor);
+      if (currentSelectedElement) {
+        handleUpdateElement({ ...currentSelectedElement, fill: newColor });
+      }
+    } else if (target === 'stroke') {
+      setStrokeColor(newColor);
+      if (currentSelectedElement) {
+        handleUpdateElement({ ...currentSelectedElement, stroke: newColor });
+      }
+    } else if (target === 'background') {
+      setDoc((prev) => ({ ...prev, backgroundColor: newColor }));
     }
   };
 
@@ -838,6 +1109,174 @@ export default function App() {
     }));
 
     playButtonClick();
+  };
+
+  // Symbol Management: Rename, Delete, Duplicate, Jump To Instance, Instantiate
+  const handleRenameSymbol = (symbolId: string, newName: string) => {
+    setDoc((prev) => renameSymbolInDocument(prev, symbolId, newName));
+  };
+
+  const handleDeleteSymbol = (symbolId: string, mode: 'cascade' | 'breakApart' = 'cascade') => {
+    setDoc((prev) => deleteSymbolFromDocument(prev, symbolId, mode));
+    if (currentSymbolId === symbolId) {
+      setCurrentSymbolId(null);
+    }
+  };
+
+  const handleDuplicateSymbol = (symbolId: string) => {
+    setDoc((prev) => {
+      const { updatedDoc } = duplicateSymbolInDocument(prev, symbolId);
+      return updatedDoc;
+    });
+  };
+
+  const handleInstantiateSymbol = (sym: FlashSymbol) => {
+    const newEl: FlashElement = {
+      id: `sym_inst_${Date.now()}`,
+      name: sym.name,
+      type: 'symbolInstance',
+      symbolId: sym.id,
+      x: Math.round(doc.width / 2) - 100,
+      y: Math.round(doc.height / 2) - 80,
+      width: 200,
+      height: 160,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      opacity: 1,
+      fill: '#14b8a6',
+      stroke: '#0f766e',
+      strokeWidth: 3,
+    };
+    handleAddElement(newEl);
+    setSelectedElementId(newEl.id);
+    playButtonClick();
+  };
+
+  const handleJumpToInstance = (loc: SymbolInstanceLocation) => {
+    if (loc.containerType === 'scene') {
+      setCurrentSymbolId(null);
+      setCurrentSceneId(loc.containerId);
+      setSelectedLayerId(loc.layerId);
+      setCurrentFrame(loc.frame);
+      setSelectedElementId(loc.elementId);
+    } else if (loc.containerType === 'symbol') {
+      setCurrentSymbolId(loc.containerId);
+      setSelectedLayerId(loc.layerId);
+      setCurrentFrame(loc.frame);
+      setSelectedElementId(loc.elementId);
+    }
+  };
+
+  // Media Resources Management (Imágenes, Sonidos, Videos y Carpetas personalizadas)
+  const handleCreateMediaFolder = (name: string, color?: string) => {
+    const newFolder: MediaFolder = {
+      id: `folder_${Date.now()}`,
+      name,
+      color: color || '#14b8a6',
+      createdAt: Date.now(),
+    };
+    setDoc((prev) => ({
+      ...prev,
+      mediaFolders: [...(prev.mediaFolders || DEFAULT_MEDIA_FOLDERS), newFolder],
+    }));
+    playButtonClick();
+  };
+
+  const handleRenameMediaFolder = (folderId: string, newName: string) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaFolders: (prev.mediaFolders || DEFAULT_MEDIA_FOLDERS).map((f) =>
+        f.id === folderId ? { ...f, name: newName } : f
+      ),
+    }));
+  };
+
+  const handleDeleteMediaFolder = (folderId: string) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaFolders: (prev.mediaFolders || DEFAULT_MEDIA_FOLDERS).filter((f) => f.id !== folderId),
+      // Move assets inside deleted folder to root
+      mediaAssets: (prev.mediaAssets || DEFAULT_MEDIA_ASSETS).map((a) =>
+        a.folderId === folderId ? { ...a, folderId: null } : a
+      ),
+    }));
+    if (selectedMediaFolderId === folderId) {
+      setSelectedMediaFolderId(null);
+    }
+  };
+
+  const handleAddMediaAsset = (asset: MediaAsset) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaAssets: [asset, ...(prev.mediaAssets || DEFAULT_MEDIA_ASSETS)],
+    }));
+    playButtonClick();
+  };
+
+  const handleRenameMediaAsset = (assetId: string, newName: string) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaAssets: (prev.mediaAssets || DEFAULT_MEDIA_ASSETS).map((a) =>
+        a.id === assetId ? { ...a, name: newName } : a
+      ),
+    }));
+  };
+
+  const handleDeleteMediaAsset = (assetId: string) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaAssets: (prev.mediaAssets || DEFAULT_MEDIA_ASSETS).filter((a) => a.id !== assetId),
+    }));
+  };
+
+  const handleMoveMediaAsset = (assetId: string, targetFolderId: string | null) => {
+    setDoc((prev) => ({
+      ...prev,
+      mediaAssets: (prev.mediaAssets || DEFAULT_MEDIA_ASSETS).map((a) =>
+        a.id === assetId ? { ...a, folderId: targetFolderId } : a
+      ),
+    }));
+  };
+
+  const handleInsertImageToStage = (asset: MediaAsset) => {
+    const defaultW = asset.dimensions?.width ? Math.min(600, asset.dimensions.width) : 320;
+    const defaultH = asset.dimensions?.height ? Math.min(450, asset.dimensions.height) : 240;
+    const newEl: FlashElement = {
+      id: `media_${Date.now()}`,
+      name: asset.name.replace(/\.[^/.]+$/, ''),
+      type: asset.type === 'video' ? 'video' : 'image',
+      x: Math.round(doc.width / 2) - Math.round(defaultW / 2),
+      y: Math.round(doc.height / 2) - Math.round(defaultH / 2),
+      width: defaultW,
+      height: defaultH,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      opacity: 1,
+      fill: 'transparent',
+      stroke: 'transparent',
+      strokeWidth: 0,
+      mediaAssetId: asset.id,
+      mediaUrl: asset.url,
+    };
+    handleAddElement(newEl);
+    setSelectedElementId(newEl.id);
+    playButtonClick();
+  };
+
+  const handleAttachSoundToKeyframe = (sound: KeyframeSound) => {
+    if (!selectedLayer) return;
+    let kf = selectedLayer.keyframes.find((k) => k.frame === currentFrame);
+    if (!kf) {
+      handleInsertKeyframe(selectedLayer.id, currentFrame);
+      kf = selectedLayer.keyframes.find((k) => k.frame === currentFrame);
+    }
+    if (kf) {
+      kf.sound = sound;
+      updateActiveLayers([...activeLayers]);
+      playAssetAudio(sound.url, sound.volume ?? 1);
+    }
   };
 
   // Apply project settings / new project
@@ -1171,8 +1610,81 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
-      {/* Top Application Header Bar */}
-      <header className="h-11 bg-zinc-900 border-b border-zinc-800 px-4 flex items-center justify-between shrink-0 select-none">
+      {/* Native Desktop Style Top Menu Bar */}
+      <TopMenuBar
+        onNewDocument={() => setProjectSettingsModal({ isOpen: true, isNew: true })}
+        onOpenDocument={handleOpenSlowProject}
+        onSaveDocument={handleSaveSlowProject}
+        onOpenSettings={() => setProjectSettingsModal({ isOpen: true, isNew: false })}
+        onExport={() => setExportModal(true)}
+        onUndo={() => {}}
+        onRedo={() => {}}
+        onCut={() => {}}
+        onCopy={() => {}}
+        onPaste={() => {}}
+        onSelectAll={() => {}}
+        onDeleteSelected={handleDeleteSelectedElement}
+        onDuplicateSelected={() => {
+          const currentEl = activeLayers
+            .flatMap((l) => l.keyframes.find((k) => k.frame === currentFrame)?.elements || [])
+            .find((e) => e.id === selectedElementId);
+          if (currentEl) {
+            const clone = {
+              ...currentEl,
+              id: `${currentEl.type}_${Date.now()}`,
+              name: `${currentEl.name} (Copia)`,
+              x: currentEl.x + 20,
+              y: currentEl.y + 20,
+            };
+            handleAddElement(clone);
+          }
+        }}
+        onZoomIn={() => {}}
+        onZoomOut={() => {}}
+        onZoomFit={() => {}}
+        onZoom100={() => {}}
+        showGrid={showGrid}
+        onToggleGrid={() => setShowGrid((g) => !g)}
+        snapToGrid={snapToGrid}
+        onToggleSnapToGrid={() => setSnapToGrid((s) => !s)}
+        gridSize={gridSize}
+        onChangeGridSize={(sz) => setGridSize(sz)}
+        onionSkin={onionSkin}
+        onToggleOnionSkin={() => setOnionSkin((o) => !o)}
+        isIsolatedMode={isIsolatedMode}
+        onToggleIsolatedMode={() => setIsIsolatedMode((v) => !v)}
+        onInsertKeyframe={() => handleInsertKeyframe(selectedLayerId, currentFrame)}
+        onInsertBlankKeyframe={() => handleInsertBlankKeyframe(selectedLayerId, currentFrame)}
+        onInsertFrame={() => handleInsertKeyframe(selectedLayerId, currentFrame)}
+        onDeleteKeyframe={() => handleClearKeyframe(selectedLayerId, currentFrame)}
+        onConvertToSymbol={() => setSymbolModal(true)}
+        onOpenSymbolManager={() => setSymbolManagerModalOpen(true)}
+        onAddLayer={handleAddLayer}
+        onAddBackgroundLayer={() => setBackgroundModalOpen(true)}
+        onGroupSelected={handleGroupSelected}
+        onBreakApartSelected={handleBreakApartSelected}
+        onCreateMotionTween={() => handleSetTween(selectedLayerId, currentFrame, 'motion')}
+        onCreateShapeTween={() => handleSetTween(selectedLayerId, currentFrame, 'shape')}
+        onRemoveTween={() => handleSetTween(selectedLayerId, currentFrame, 'none')}
+        onOpenMotionPath={() => setIsMotionPathPanelOpen((prev) => !prev)}
+        isPlaying={isPlaying}
+        onOpenColorPicker={handleOpenColorPicker}
+        onTogglePlay={() => setIsPlaying((p) => !p)}
+        onRewind={() => setCurrentFrame(1)}
+        onStepForward={() => setCurrentFrame((f) => Math.min(doc.totalFrames, f + 1))}
+        onStepBackward={() => setCurrentFrame((f) => Math.max(1, f - 1))}
+        activeTool={activeTool}
+        onSelectTool={setActiveTool}
+        onShowHelp={() => {
+          alert('Atajos de slow studio:\nV: Selección\nA: Subselección (Nodos)\nQ: Transformación Libre\nH: Mano (mantener Espacio)\nZ: Zoom (Alt clic para alejar)\nG: Cuadrícula Magnética (Snap)\nF6: Crear Keyframe\nF7: Keyframe Vacío\nF8: Convertir en Símbolo\nCtrl+G: Agrupar\nCtrl+B: Separar\nEnter / Espacio: Reproducir');
+        }}
+        onShowAbout={() => {
+          alert('slow studio v2.4\nMotor de Animación Vectorial Interactivo con IA\nResolución Proporcional 1920×1080.');
+        }}
+      />
+
+      {/* Secondary Application Header Bar */}
+      <header className="h-10 bg-zinc-900/90 border-b border-zinc-800 px-4 flex items-center justify-between shrink-0 select-none">
         {/* Brand & Breadcrumbs Navigation */}
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
@@ -1263,6 +1775,14 @@ export default function App() {
               <Folder className="w-3.5 h-3.5" />
               <span>Biblioteca ({doc.symbols.length})</span>
             </button>
+            <button
+              onClick={() => setSymbolManagerModalOpen(true)}
+              title="Abrir Gestión de Símbolos dedicada (Ctrl+F8)"
+              className="px-2 py-1 rounded text-zinc-400 hover:text-teal-300 hover:bg-zinc-900 transition flex items-center gap-1 border border-transparent hover:border-teal-500/30"
+            >
+              <Film className="w-3.5 h-3.5 text-teal-400" />
+              <span className="hidden sm:inline">Gestión</span>
+            </button>
           </div>
 
           <div className="h-4 w-px bg-zinc-800 mx-1" />
@@ -1307,6 +1827,10 @@ export default function App() {
               onChangeStrokeColor={setStrokeColor}
               strokeWidth={strokeWidth}
               onChangeStrokeWidth={setStrokeWidth}
+              snapToGrid={snapToGrid}
+              onToggleSnapToGrid={() => setSnapToGrid((s) => !s)}
+              gridSize={gridSize}
+              onOpenColorPicker={handleOpenColorPicker}
             />
 
             {/* The White Interactive HTML5 Canvas (Escenario Base 1920x1080) */}
@@ -1323,7 +1847,11 @@ export default function App() {
               strokeWidth={strokeWidth}
               selectedElementId={selectedElementId}
               selectedPointIndex={selectedPointIndex}
-              onSelectElement={setSelectedElementId}
+              selectedLayerId={selectedLayerId}
+              isIsolatedMode={isIsolatedMode}
+              onToggleIsolatedMode={() => setIsIsolatedMode((v) => !v)}
+              onSelectLayer={setSelectedLayerId}
+              onSelectElement={handleSelectElement}
               onSelectPointIndex={setSelectedPointIndex}
               onUpdateElement={handleUpdateElement}
               onAddElement={handleAddElement}
@@ -1335,6 +1863,14 @@ export default function App() {
               onToggleOnionSkin={() => setOnionSkin((o) => !o)}
               onExecuteAction={handleExecuteAction}
               activeKeyframePrompt={activeKeyframe?.prompt}
+              showGrid={showGrid}
+              onToggleGrid={() => setShowGrid((g) => !g)}
+              snapToGrid={snapToGrid}
+              onToggleSnapToGrid={() => setSnapToGrid((s) => !s)}
+              gridSize={gridSize}
+              onUpdateMotionPath={handleUpdateMotionPath}
+              isMotionPathPanelOpen={isMotionPathPanelOpen}
+              onToggleMotionPathPanel={() => setIsMotionPathPanelOpen((prev) => !prev)}
             />
 
             {/* Right Side Panel */}
@@ -1363,36 +1899,23 @@ export default function App() {
                 onBreakApartSelected={handleBreakApartSelected}
                 onPromptGenerateForFrame={(f, p) => handleApplyFramePrompt(f, p, true)}
                 onOpenProjectSettings={() => setProjectSettingsModal({ isOpen: true, isNew: false })}
+                isPlaying={isPlaying}
+                onOpenColorPicker={handleOpenColorPicker}
+                onOpenMotionPathPanel={() => setIsMotionPathPanelOpen(true)}
               />
             )}
 
             {activeSidePanel === 'library' && (
               <LibraryPanel
                 symbols={doc.symbols}
-                onInstantiateSymbol={(sym) => {
-                  const newEl: FlashElement = {
-                    id: `sym_inst_${Date.now()}`,
-                    name: sym.name,
-                    type: 'symbolInstance',
-                    symbolId: sym.id,
-                    x: Math.round(doc.width / 2) - 100,
-                    y: Math.round(doc.height / 2) - 80,
-                    width: 200,
-                    height: 160,
-                    rotation: 0,
-                    scaleX: 1,
-                    scaleY: 1,
-                    opacity: 1,
-                    fill: '#14b8a6',
-                    stroke: '#0f766e',
-                    strokeWidth: 3,
-                  };
-                  handleAddElement(newEl);
-                  setSelectedElementId(newEl.id);
-                  playButtonClick();
-                }}
+                document={doc}
+                onInstantiateSymbol={handleInstantiateSymbol}
                 onEditSymbol={(symId) => setCurrentSymbolId(symId)}
                 onCreateNewSymbol={() => setSymbolModal(true)}
+                onOpenSymbolManager={() => setSymbolManagerModalOpen(true)}
+                onRenameSymbol={handleRenameSymbol}
+                onDeleteSymbol={(symId) => handleDeleteSymbol(symId, 'cascade')}
+                onDuplicateSymbol={handleDuplicateSymbol}
               />
             )}
           </div>
@@ -1407,6 +1930,8 @@ export default function App() {
             isLooping={isLooping}
             selectedLayerId={selectedLayerId}
             onSelectLayer={setSelectedLayerId}
+            isIsolatedMode={isIsolatedMode}
+            onToggleIsolatedMode={() => setIsIsolatedMode((v) => !v)}
             onSelectFrame={setCurrentFrame}
             onTogglePlay={() => setIsPlaying((p) => !p)}
             onToggleLoop={() => setIsLooping((l) => !l)}
@@ -1417,6 +1942,10 @@ export default function App() {
             onStepBack={() => setCurrentFrame((f) => Math.max(1, f - 1))}
             onStepForward={() => setCurrentFrame((f) => Math.min(doc.totalFrames, f + 1))}
             onAddLayer={handleAddLayer}
+            onAddBackgroundLayer={() => setBackgroundModalOpen(true)}
+            onMoveLayerUp={handleMoveLayerUp}
+            onMoveLayerDown={handleMoveLayerDown}
+            onDuplicateLayer={handleDuplicateLayer}
             onDeleteLayer={handleDeleteLayer}
             onToggleLayerVisibility={handleToggleLayerVisibility}
             onToggleLayerLock={handleToggleLayerLock}
@@ -1501,10 +2030,83 @@ export default function App() {
         onConfirm={handleConvertToSymbol}
       />
 
+      {/* Dedicated Symbol Management Panel & Inspector */}
+      <SymbolManagerModal
+        isOpen={symbolManagerModalOpen}
+        onClose={() => setSymbolManagerModalOpen(false)}
+        document={doc}
+        onRenameSymbol={handleRenameSymbol}
+        onDeleteSymbol={handleDeleteSymbol}
+        onDuplicateSymbol={handleDuplicateSymbol}
+        onInstantiateSymbol={handleInstantiateSymbol}
+        onEditSymbolTimeline={(symId) => setCurrentSymbolId(symId)}
+        onCreateNewSymbol={() => setSymbolModal(true)}
+        onJumpToInstance={handleJumpToInstance}
+      />
+
       <ExportModal
         isOpen={exportModal}
         onClose={() => setExportModal(false)}
         document={doc}
+      />
+
+      <BackgroundLayerModal
+        isOpen={backgroundModalOpen}
+        onClose={() => setBackgroundModalOpen(false)}
+        onSelectPreset={handleAddBackgroundLayer}
+        stageWidth={doc.width}
+        stageHeight={doc.height}
+      />
+
+      {/* Floating Color & Gradient Picker with Studio Palettes */}
+      <FloatingColorPicker
+        isOpen={isColorPickerOpen}
+        onClose={() => setIsColorPickerOpen(false)}
+        currentColor={
+          colorPickerTarget === 'background'
+            ? doc.backgroundColor
+            : colorPickerTarget === 'stroke'
+            ? (currentSelectedElement?.stroke || strokeColor)
+            : (currentSelectedElement?.fill || primaryColor)
+        }
+        onChangeColor={handleColorPickerChange}
+        target={colorPickerTarget}
+        onChangeTarget={setColorPickerTarget}
+        hasSelectedElement={!!currentSelectedElement}
+      />
+
+      {/* Motion Path Bézier Trajectory Inspector & Curve Studio */}
+      <MotionPathPanel
+        isOpen={isMotionPathPanelOpen}
+        onClose={() => setIsMotionPathPanelOpen(false)}
+        selectedLayer={selectedLayer}
+        currentFrame={currentFrame}
+        selectedElementId={selectedElementId}
+        onUpdateKeyframe={(updates, targetFrame) => {
+          const frameToUpdate = targetFrame !== undefined ? targetFrame : currentFrame;
+          if (selectedLayer) {
+            const kf = selectedLayer.keyframes.find((k) => k.frame === frameToUpdate);
+            if (kf) {
+              Object.assign(kf, updates);
+              updateActiveLayers([...activeLayers]);
+            }
+          }
+        }}
+        onCreateMotionTween={() => handleSetTween(selectedLayerId, currentFrame, 'motion')}
+        stageWidth={doc.width}
+        stageHeight={doc.height}
+      />
+
+      {/* Modern Splash Screen on Launch */}
+      {showSplash && <SplashScreen onFinish={handleFinishSplash} />}
+
+      {/* Hidden File Input for Opening .slow and .json Projects */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        accept=".slow,.json"
+        className="hidden"
       />
     </div>
   );

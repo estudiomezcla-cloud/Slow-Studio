@@ -4,6 +4,7 @@ import {
   X,
   FileCode,
   Film,
+  Video,
   Monitor,
   Apple,
   Terminal,
@@ -13,6 +14,7 @@ import {
 } from 'lucide-react';
 import { FlashDocument, FlashElement } from '../../types/flash';
 import { getLayerElementsAtFrame } from '../../utils/interpolation';
+import { resolveCanvasFill } from '../../utils/colorUtils';
 import JSZip from 'jszip';
 // @ts-ignore
 import gifshot from 'gifshot';
@@ -28,6 +30,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportProgress, setExportProgress] = useState<string>('');
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const [mp4Loops, setMp4Loops] = useState<number>(1);
 
   if (!isOpen) return null;
 
@@ -224,6 +227,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
           if (el.opacity <= 0) return;
           ctx.save();
           ctx.globalAlpha = el.opacity ?? 1;
+
+          if (el.filters) {
+            var filterParts = [];
+            if (el.filters.blur !== undefined && el.filters.blur > 0) filterParts.push('blur(' + el.filters.blur + 'px)');
+            if (el.filters.brightness !== undefined && el.filters.brightness !== 100) filterParts.push('brightness(' + el.filters.brightness + '%)');
+            if (el.filters.contrast !== undefined && el.filters.contrast !== 100) filterParts.push('contrast(' + el.filters.contrast + '%)');
+            if (filterParts.length > 0) ctx.filter = filterParts.join(' ');
+
+            if (el.filters.dropShadow && el.filters.dropShadow.enabled) {
+              ctx.shadowColor = el.filters.dropShadow.color || 'rgba(0,0,0,0.6)';
+              ctx.shadowBlur = el.filters.dropShadow.blur !== undefined ? el.filters.dropShadow.blur : 8;
+              ctx.shadowOffsetX = el.filters.dropShadow.offsetX !== undefined ? el.filters.dropShadow.offsetX : 4;
+              ctx.shadowOffsetY = el.filters.dropShadow.offsetY !== undefined ? el.filters.dropShadow.offsetY : 4;
+            }
+          }
+
           const cx = el.shapeType === 'circle' ? el.x : el.x + el.width / 2;
           const cy = el.shapeType === 'circle' ? el.y : el.y + el.height / 2;
           ctx.translate(cx, cy);
@@ -314,14 +333,336 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
     setTimeout(() => setExportSuccess(null), 3500);
   };
 
-  // 3. Export Animated GIF
+  // Helper: Draw 5-pointed star
+  const drawStarShape = (
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    spikes: number,
+    outerRadius: number,
+    innerRadius: number
+  ) => {
+    let rot = (Math.PI / 2) * 3;
+    let x = cx;
+    let y = cy;
+    const step = Math.PI / spikes;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - outerRadius);
+    for (let i = 0; i < spikes; i++) {
+      x = cx + Math.cos(rot) * outerRadius;
+      y = cy + Math.sin(rot) * outerRadius;
+      ctx.lineTo(x, y);
+      rot += step;
+
+      x = cx + Math.cos(rot) * innerRadius;
+      y = cy + Math.sin(rot) * innerRadius;
+      ctx.lineTo(x, y);
+      rot += step;
+    }
+    ctx.lineTo(cx, cy - outerRadius);
+    ctx.closePath();
+  };
+
+  // Helper: Render an individual Flash element to canvas
+  const renderElementToCanvas = (
+    ctx: CanvasRenderingContext2D,
+    el: FlashElement,
+    frame: number
+  ) => {
+    if (el.opacity <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = el.opacity ?? 1;
+
+    if (el.filters) {
+      const filterParts: string[] = [];
+      if (el.filters.blur !== undefined && el.filters.blur > 0) {
+        filterParts.push(`blur(${el.filters.blur}px)`);
+      }
+      if (el.filters.brightness !== undefined && el.filters.brightness !== 100) {
+        filterParts.push(`brightness(${el.filters.brightness}%)`);
+      }
+      if (el.filters.contrast !== undefined && el.filters.contrast !== 100) {
+        filterParts.push(`contrast(${el.filters.contrast}%)`);
+      }
+      if (filterParts.length > 0) {
+        ctx.filter = filterParts.join(' ');
+      }
+
+      if (el.filters.dropShadow?.enabled) {
+        ctx.shadowColor = el.filters.dropShadow.color || 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowBlur = el.filters.dropShadow.blur ?? 8;
+        ctx.shadowOffsetX = el.filters.dropShadow.offsetX ?? 4;
+        ctx.shadowOffsetY = el.filters.dropShadow.offsetY ?? 4;
+      }
+    }
+
+    const cx = el.shapeType === 'circle' ? el.x : el.x + el.width / 2;
+    const cy = el.shapeType === 'circle' ? el.y : el.y + el.height / 2;
+    ctx.translate(cx, cy);
+    if (el.rotation) ctx.rotate((el.rotation * Math.PI) / 180);
+    ctx.scale(el.scaleX ?? 1, el.scaleY ?? 1);
+    ctx.translate(-cx, -cy);
+
+    // Group handling
+    if (el.type === 'group' && el.children && el.children.length > 0) {
+      el.children.forEach((child) => renderElementToCanvas(ctx, child, frame));
+      ctx.restore();
+      return;
+    }
+
+    // Symbol instance handling
+    if (el.type === 'symbolInstance' && el.symbolId) {
+      const symbol = doc.symbols?.find((s) => s.id === el.symbolId);
+      if (symbol) {
+        const symFrame =
+          symbol.type === 'movieclip' && symbol.totalFrames
+            ? ((frame - 1) % symbol.totalFrames) + 1
+            : 1;
+        symbol.layers.forEach((layer) => {
+          if (!layer.visible) return;
+          const subEls = getLayerElementsAtFrame(layer, symFrame);
+          subEls.forEach((subEl) => renderElementToCanvas(ctx, subEl, symFrame));
+        });
+      }
+      ctx.restore();
+      return;
+    }
+
+    ctx.fillStyle = resolveCanvasFill(ctx, el.fill || '#14b8a6', el);
+    ctx.strokeStyle = resolveCanvasFill(ctx, el.stroke || '#0d9488', el);
+    ctx.lineWidth = el.strokeWidth || 1;
+
+    if (el.shapeType === 'rect') {
+      ctx.fillRect(el.x, el.y, el.width, el.height);
+      if (el.strokeWidth > 0 && el.stroke !== 'transparent') {
+        ctx.strokeRect(el.x, el.y, el.width, el.height);
+      }
+    } else if (el.shapeType === 'circle') {
+      ctx.beginPath();
+      ctx.ellipse(el.x, el.y, Math.abs(el.width / 2), Math.abs(el.height / 2), 0, 0, Math.PI * 2);
+      ctx.fill();
+      if (el.strokeWidth > 0 && el.stroke !== 'transparent') ctx.stroke();
+    } else if (el.shapeType === 'star') {
+      drawStarShape(ctx, el.x, el.y, 5, Math.abs(el.width / 2), Math.abs(el.width / 4));
+      ctx.fill();
+      if (el.strokeWidth > 0 && el.stroke !== 'transparent') ctx.stroke();
+    } else if (el.type === 'text') {
+      ctx.font = `${el.fontSize || 32}px ${el.fontFamily || 'sans-serif'}`;
+      ctx.fillText(el.text || '', el.x, el.y + (el.fontSize || 32));
+    } else if (el.type === 'button') {
+      ctx.fillRect(el.x, el.y, el.width, el.height);
+      ctx.strokeRect(el.x, el.y, el.width, el.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(el.name || 'Botón', el.x + el.width / 2, el.y + el.height / 2);
+    } else if (el.points && el.points.length > 0) {
+      ctx.beginPath();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      el.points.forEach((pt, i) => {
+        if (i === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      if (el.fill && el.fill !== 'transparent') ctx.fill();
+      if (el.strokeWidth > 0 && el.stroke !== 'transparent') ctx.stroke();
+    }
+
+    ctx.restore();
+  };
+
+  // Helper: Draw complete frame to canvas
+  const drawFrameToCanvas = (
+    ctx: CanvasRenderingContext2D,
+    frame: number,
+    targetW?: number,
+    targetH?: number
+  ) => {
+    const width = targetW || doc.width;
+    const height = targetH || doc.height;
+
+    // Background color
+    ctx.fillStyle = doc.backgroundColor || '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+
+    const scale = targetW ? targetW / doc.width : 1;
+    ctx.save();
+    if (scale !== 1) {
+      ctx.scale(scale, scale);
+    }
+
+    const scene = doc.scenes[0];
+    if (scene) {
+      scene.layers.forEach((layer) => {
+        if (!layer.visible) return;
+        const els = getLayerElementsAtFrame(layer, frame);
+        els.forEach((el) => {
+          renderElementToCanvas(ctx, el, frame);
+        });
+      });
+    }
+
+    ctx.restore();
+  };
+
+  // 3. Export Video directly to MP4 using browser MediaRecorder API
+  const handleExportMp4 = async () => {
+    if (typeof window === 'undefined') return;
+
+    if (typeof MediaRecorder === 'undefined') {
+      alert('Tu navegador actual no soporta la API de MediaRecorder para exportar video.');
+      return;
+    }
+
+    setIsExporting(true);
+    setExportProgress('Iniciando motor de captura de video MediaRecorder...');
+
+    let offscreenCanvas: HTMLCanvasElement | null = null;
+
+    try {
+      offscreenCanvas = window.document.createElement('canvas');
+      offscreenCanvas.width = doc.width;
+      offscreenCanvas.height = doc.height;
+      offscreenCanvas.style.position = 'fixed';
+      offscreenCanvas.style.left = '-9999px';
+      offscreenCanvas.style.top = '-9999px';
+      offscreenCanvas.style.opacity = '0';
+      offscreenCanvas.style.pointerEvents = 'none';
+      window.document.body.appendChild(offscreenCanvas);
+
+      const ctx = offscreenCanvas.getContext('2d');
+      if (!ctx) throw new Error('No se pudo inicializar el contexto 2D');
+
+      // Candidate MIME types prioritising MP4 / H264
+      const mimeCandidates = [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4;codecs=avc1',
+        'video/mp4;codecs=h264',
+        'video/mp4',
+        'video/webm;codecs=h264',
+        'video/webm;codecs=vp9',
+        'video/webm',
+      ];
+
+      let chosenMime = '';
+      for (const m of mimeCandidates) {
+        if (MediaRecorder.isTypeSupported(m)) {
+          chosenMime = m;
+          break;
+        }
+      }
+
+      // Draw initial frame
+      drawFrameToCanvas(ctx, 1);
+
+      // Create stream directly from canvas
+      const stream = (offscreenCanvas as any).captureStream
+        ? (offscreenCanvas as any).captureStream(doc.fps)
+        : null;
+
+      if (!stream) {
+        throw new Error('captureStream() no está disponible en este navegador');
+      }
+
+      const videoTrack = stream.getVideoTracks()[0];
+      const recorderOptions: MediaRecorderOptions = {
+        videoBitsPerSecond: 16000000, // 16 Mbps high fidelity
+      };
+      if (chosenMime) {
+        recorderOptions.mimeType = chosenMime;
+      }
+
+      const recorder = new MediaRecorder(stream, recorderOptions);
+      const chunks: Blob[] = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
+
+      const recordFinishedPromise = new Promise<Blob>((resolve, reject) => {
+        recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: chosenMime || 'video/mp4' });
+          resolve(blob);
+        };
+        recorder.onerror = (e) => reject(e);
+      });
+
+      recorder.start();
+
+      const frameDurationMs = 1000 / doc.fps;
+      const totalFrames = doc.totalFrames;
+      const loopsToRecord = Math.max(1, mp4Loops);
+      const totalSteps = totalFrames * loopsToRecord;
+
+      let step = 0;
+      for (let loop = 0; loop < loopsToRecord; loop++) {
+        for (let f = 1; f <= totalFrames; f++) {
+          step++;
+          const percent = Math.round((step / totalSteps) * 100);
+          setExportProgress(
+            `Renderizando MP4 (${doc.fps} FPS): Frame ${f}/${totalFrames} (Ciclo ${loop + 1}/${loopsToRecord} • ${percent}%)...`
+          );
+
+          drawFrameToCanvas(ctx, f);
+
+          if (videoTrack && (videoTrack as any).requestFrame) {
+            try {
+              (videoTrack as any).requestFrame();
+            } catch (err) {
+              // optional requestFrame
+            }
+          }
+
+          // Delay for precise framerate timing
+          await new Promise((resolve) => setTimeout(resolve, frameDurationMs));
+        }
+      }
+
+      // Allow slight buffer time for the stream encoder
+      await new Promise((resolve) => setTimeout(resolve, Math.max(250, frameDurationMs * 2)));
+
+      setExportProgress('Finalizando codificación y empaquetando MP4...');
+      recorder.stop();
+
+      const videoBlob = await recordFinishedPromise;
+
+      const url = URL.createObjectURL(videoBlob);
+      const downloadAnchor = window.document.createElement('a');
+      downloadAnchor.href = url;
+      downloadAnchor.download = `${fileNameBase}.mp4`;
+      window.document.body.appendChild(downloadAnchor);
+      downloadAnchor.click();
+      window.document.body.removeChild(downloadAnchor);
+      URL.revokeObjectURL(url);
+
+      const sizeMb = (videoBlob.size / (1024 * 1024)).toFixed(2);
+      setExportSuccess(
+        `¡Video MP4 generado exitosamente (${sizeMb} MB • ${doc.width}×${doc.height} px • ${doc.fps} FPS)!`
+      );
+      setTimeout(() => setExportSuccess(null), 4500);
+    } catch (err: any) {
+      console.error(err);
+      alert('Error renderizando MP4 con MediaRecorder: ' + (err?.message || err));
+    } finally {
+      setIsExporting(false);
+      setExportProgress('');
+      if (offscreenCanvas && offscreenCanvas.parentNode) {
+        offscreenCanvas.parentNode.removeChild(offscreenCanvas);
+      }
+    }
+  };
+
+  // 4. Export Animated GIF
   const handleExportGif = async () => {
     setIsExporting(true);
     setExportProgress('Renderizando fotogramas para el GIF...');
 
     try {
       const offscreenCanvas = window.document.createElement('canvas');
-      // Scale down slightly for fast encoding if 4K/1080p
       const targetW = Math.min(800, doc.width);
       const targetH = Math.round((targetW / doc.width) * doc.height);
       offscreenCanvas.width = targetW;
@@ -334,63 +675,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
 
       for (let f = 1; f <= total; f++) {
         setExportProgress(`Capturando fotograma ${f} de ${total}...`);
-        // Draw background
-        ctx.fillStyle = doc.backgroundColor || '#ffffff';
-        ctx.fillRect(0, 0, targetW, targetH);
-
-        const scale = targetW / doc.width;
-        ctx.save();
-        ctx.scale(scale, scale);
-
-        // Render layers at frame f
-        const scene = doc.scenes[0];
-        if (scene) {
-          scene.layers.forEach((layer) => {
-            if (!layer.visible) return;
-            const els = getLayerElementsAtFrame(layer, f);
-            els.forEach((el) => {
-              if (el.opacity <= 0) return;
-              ctx.save();
-              ctx.globalAlpha = el.opacity ?? 1;
-              const cx = el.shapeType === 'circle' ? el.x : el.x + el.width / 2;
-              const cy = el.shapeType === 'circle' ? el.y : el.y + el.height / 2;
-              ctx.translate(cx, cy);
-              if (el.rotation) ctx.rotate((el.rotation * Math.PI) / 180);
-              ctx.scale(el.scaleX ?? 1, el.scaleY ?? 1);
-              ctx.translate(-cx, -cy);
-
-              ctx.fillStyle = el.fill || '#14b8a6';
-              ctx.strokeStyle = el.stroke || '#0d9488';
-              ctx.lineWidth = el.strokeWidth || 1;
-
-              if (el.shapeType === 'rect') {
-                ctx.fillRect(el.x, el.y, el.width, el.height);
-                if (el.strokeWidth > 0 && el.stroke !== 'transparent') {
-                  ctx.strokeRect(el.x, el.y, el.width, el.height);
-                }
-              } else if (el.shapeType === 'circle') {
-                ctx.beginPath();
-                ctx.ellipse(el.x, el.y, Math.abs(el.width / 2), Math.abs(el.height / 2), 0, 0, Math.PI * 2);
-                ctx.fill();
-                if (el.strokeWidth > 0 && el.stroke !== 'transparent') ctx.stroke();
-              } else if (el.type === 'text') {
-                ctx.font = `${el.fontSize || 24}px sans-serif`;
-                ctx.fillText(el.text || '', el.x, el.y + (el.fontSize || 24));
-              } else if (el.points && el.points.length > 0) {
-                ctx.beginPath();
-                el.points.forEach((pt, i) => {
-                  if (i === 0) ctx.moveTo(pt.x, pt.y);
-                  else ctx.lineTo(pt.x, pt.y);
-                });
-                if (el.fill && el.fill !== 'transparent') ctx.fill();
-                if (el.strokeWidth > 0 && el.stroke !== 'transparent') ctx.stroke();
-              }
-              ctx.restore();
-            });
-          });
-        }
-        ctx.restore();
-
+        drawFrameToCanvas(ctx, f, targetW, targetH);
         frameImages.push(offscreenCanvas.toDataURL('image/png'));
       }
 
@@ -648,6 +933,153 @@ CÓMO EJECUTAR EN LINUX:
     }
   };
 
+  // 7. Master Bundle: Export ALL 3 Desktop Platforms in a single ZIP (Windows .exe, macOS .app, Linux .sh)
+  const handleExportAllThree = async () => {
+    setIsExporting(true);
+    setExportProgress('Empaquetando las 3 plataformas (Windows .exe, Mac .app, Linux .sh)...');
+
+    try {
+      const zip = new JSZip();
+      const htmlContent = generateStandaloneHtml();
+
+      // Folder 1: Windows PC (.exe / .bat)
+      const winFolder = zip.folder('1_Windows_PC');
+      if (winFolder) {
+        winFolder.file('index.html', htmlContent);
+        const batScript = `@echo off
+title ${doc.title} - slow studio Player
+echo ========================================================
+echo   slow studio - Iniciando proyector para Windows...
+echo ========================================================
+start msedge --app="%~dp0index.html" --window-size=${doc.width},${doc.height + 60}
+if errorlevel 1 (
+  start chrome --app="%~dp0index.html" --window-size=${doc.width},${doc.height + 60}
+)
+if errorlevel 1 (
+  start "" "%~dp0index.html"
+)
+exit
+`;
+        winFolder.file(`Iniciar_${fileNameBase}.bat`, batScript);
+        winFolder.file(`Iniciar_${fileNameBase}.cmd`, batScript);
+        const winPackageJson = {
+          name: fileNameBase,
+          version: '1.0.0',
+          description: `${doc.title} - slow studio Windows Native Player`,
+          main: 'index.html',
+          window: {
+            title: `${doc.title} - slow studio`,
+            width: doc.width,
+            height: doc.height + 50,
+            toolbar: false,
+            frame: true,
+            icon: 'icon.png',
+          },
+        };
+        winFolder.file('package.json', JSON.stringify(winPackageJson, null, 2));
+        winFolder.file(
+          'LEEME_WINDOWS.txt',
+          `========================================================\n  slow studio - PROYECTOR WINDOWS (.EXE / .BAT)\n========================================================\nProyecto: ${doc.title}\nResolución: ${doc.width} x ${doc.height} px | ${doc.fps} FPS\n\nCÓMO EJECUTAR:\n1. Haz doble clic en "Iniciar_${fileNameBase}.bat".\n2. Se abrirá inmediatamente en pantalla con el reproductor nativo.\n\nPara compilar a .EXE independiente con nwjs/electron:\n- Ejecuta: npx nw-builder -p win64 .\n`
+        );
+      }
+
+      // Folder 2: macOS Apple (.app)
+      const macFolder = zip.folder('2_macOS_Apple');
+      if (macFolder) {
+        const appName = `${doc.title.replace(/\s+/g, '_')}.app`;
+        const contentsDir = macFolder.folder(`${appName}/Contents`);
+        const macOsDir = contentsDir?.folder('MacOS');
+        const resDir = contentsDir?.folder('Resources');
+        resDir?.file('index.html', htmlContent);
+
+        const macLauncher = `#!/bin/bash\nDIR="$( cd "$( dirname "\${BASH_SOURCE[0]}" )" && pwd )"\nHTML_PATH="$DIR/../Resources/index.html"\nopen "$HTML_PATH"\n`;
+        macOsDir?.file('launcher', macLauncher);
+
+        const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n    <key>CFBundleExecutable</key>\n    <string>launcher</string>\n    <key>CFBundleIdentifier</key>\n    <string>studio.slow.${fileNameBase}</string>\n    <key>CFBundleName</key>\n    <string>${doc.title}</string>\n    <key>CFBundlePackageType</key>\n    <string>APPL</string>\n    <key>CFBundleShortVersionString</key>\n    <string>1.0</string>\n</dict>\n</plist>`;
+        contentsDir?.file('Info.plist', infoPlist);
+
+        macFolder.file(
+          'Abrir_en_Mac.command',
+          `#!/bin/bash\ncd "$(dirname "$0")"\nopen "${appName}/Contents/Resources/index.html"\n`
+        );
+        macFolder.file(
+          'LEEME_MAC.txt',
+          `========================================================\n  slow studio - PROYECTOR MACOS (.APP)\n========================================================\nProyecto: ${doc.title}\nResolución: ${doc.width} x ${doc.height} px | ${doc.fps} FPS\n\nCÓMO EJECUTAR EN MAC:\n1. Haz doble clic en "${appName}" o en "Abrir_en_Mac.command".\n`
+        );
+      }
+
+      // Folder 3: Linux (.sh / AppImage)
+      const linuxFolder = zip.folder('3_Linux');
+      if (linuxFolder) {
+        linuxFolder.file('standalone.html', htmlContent);
+        const shRunner = `#!/usr/bin/env bash\nSCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"\nxdg-open "$SCRIPT_DIR/standalone.html" 2>/dev/null || sensible-browser "$SCRIPT_DIR/standalone.html" 2>/dev/null || x-www-browser "$SCRIPT_DIR/standalone.html"\n`;
+        linuxFolder.file(`ejecutar_${fileNameBase}.sh`, shRunner);
+        linuxFolder.file('AppRun', shRunner);
+        linuxFolder.file(
+          `${fileNameBase}.desktop`,
+          `[Desktop Entry]\nType=Application\nName=${doc.title}\nComment=Animación vectorial slow studio\nExec=./ejecutar_${fileNameBase}.sh\nIcon=utilities-terminal\nTerminal=false\nCategories=Graphics;Animation;\n`
+        );
+        linuxFolder.file(
+          'LEEME_LINUX.txt',
+          `========================================================\n  slow studio - PROYECTOR LINUX (.SH)\n========================================================\nProyecto: ${doc.title}\nResolución: ${doc.width} x ${doc.height} px | ${doc.fps} FPS\n\nCÓMO EJECUTAR EN LINUX:\n1. Abre una terminal y escribe: chmod +x ejecutar_${fileNameBase}.sh\n2. Ejecuta: ./ejecutar_${fileNameBase}.sh\n`
+        );
+      }
+
+      // Web and source files
+      zip.file('index.html', htmlContent);
+      zip.file(`${fileNameBase}.slow`, JSON.stringify(doc, null, 2));
+
+      // Master Readme for all 3 OS
+      const masterReadme = `==================================================================================
+   slow studio - PAQUETE COMPLETO DE LAS 3 PLATAFORMAS (WINDOWS + MACOS + LINUX)
+==================================================================================
+Proyecto: ${doc.title}
+Dimensiones: ${doc.width} x ${doc.height} píxeles (Aspect Ratio Proporcional)
+Velocidad de Fotogramas: ${doc.fps} FPS
+Total de Fotogramas: ${doc.totalFrames}
+Motor: slow studio (Motor de animación vectorial moderna)
+
+Este archivo comprimido contiene las versiones ejecutables portables de tu animación
+diseñadas para distribuirse en cualquier sistema operativo sin dependencias externas:
+
+1. [WINDOWS] Carpeta "1_Windows_PC":
+   - Iniciar_${fileNameBase}.bat: Lanzador nativo sin bordes de navegador.
+   - package.json: Estructura lista para compilación a .exe con nw-builder / electron.
+
+2. [MACOS] Carpeta "2_macOS_Apple":
+   - ${doc.title.replace(/\s+/g, '_')}.app: Paquete de aplicación nativa para macOS (Apple Silicon e Intel).
+   - Abrir_en_Mac.command: Script de apertura directa con doble clic.
+
+3. [LINUX] Carpeta "3_Linux":
+   - ejecutar_${fileNameBase}.sh: Script ejecutable con detector de navegador y display.
+   - AppRun y .desktop: Integración con lanzadores de entorno de escritorio Linux.
+
+4. [HTML5 WEB] Archivo "index.html":
+   - Reproductor HTML5 interactivo offline para cualquier navegador.
+
+5. [PROYECTO SLOW] Archivo "${fileNameBase}.slow":
+   - Proyecto editable en slow studio con capas, keyframes, interpolaciones y prompts.
+==================================================================================`;
+      zip.file('LEEME_LAS_3_PLATAFORMAS.txt', masterReadme);
+
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${fileNameBase}_LAS_3_PLATAFORMAS_Win_Mac_Linux.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      setExportSuccess('¡Paquete de las 3 plataformas (Windows, Mac y Linux) exportado!');
+      setTimeout(() => setExportSuccess(null), 4500);
+    } catch (e: any) {
+      alert('Error: ' + e.message);
+    } finally {
+      setIsExporting(false);
+      setExportProgress('');
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
       <div className="w-full max-w-2xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden flex flex-col text-zinc-200">
@@ -688,6 +1120,116 @@ CÓMO EJECUTAR EN LINUX:
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            {/* ⭐ DESTACADO: Paquete Completo de Las 3 Plataformas (Windows + macOS + Linux) */}
+            <div className="col-span-1 md:col-span-2 p-4 rounded-xl bg-gradient-to-r from-teal-950/80 via-zinc-900 to-sky-950/80 border-2 border-teal-500/60 hover:border-teal-400 transition shadow-xl shadow-teal-950/60 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-3 rounded-xl bg-teal-500/20 text-teal-300 border border-teal-500/40 shrink-0 mt-0.5">
+                  <Sparkles className="w-6 h-6 text-teal-400 animate-pulse" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sm text-white">⭐ Descargar las 3 Plataformas a la vez</span>
+                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/40 font-semibold tracking-wide uppercase">
+                      Paquete Todo en 1 ZIP
+                    </span>
+                  </div>
+                  <p className="text-[12px] text-zinc-300 mt-1 leading-relaxed">
+                    Descarga directa del paquete unificado con las versiones ejecutables portables para <strong className="text-teal-400">Windows (.exe / .bat)</strong>, <strong className="text-zinc-100">macOS (.app)</strong> y <strong className="text-emerald-400">Linux (.sh)</strong>, más el reproductor universal HTML5 y el proyecto editable <strong className="text-amber-400">.slow</strong>.
+                  </p>
+                  <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-400 font-mono">
+                    <span className="flex items-center gap-1.5 text-blue-300">
+                      <Monitor className="w-3.5 h-3.5 text-blue-400" />
+                      Windows .exe
+                    </span>
+                    <span>•</span>
+                    <span className="flex items-center gap-1.5 text-zinc-200">
+                      <Apple className="w-3.5 h-3.5 text-zinc-300" />
+                      macOS .app
+                    </span>
+                    <span>•</span>
+                    <span className="flex items-center gap-1.5 text-emerald-300">
+                      <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+                      Linux .sh
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button
+                disabled={isExporting}
+                onClick={handleExportAllThree}
+                className="w-full sm:w-auto shrink-0 py-3 px-5 rounded-lg bg-teal-500 hover:bg-teal-400 text-zinc-950 font-bold text-xs flex items-center justify-center gap-2 transition shadow-lg shadow-teal-500/30 cursor-pointer disabled:opacity-50"
+              >
+                <Download className="w-4 h-4" />
+                <span>Exportar las 3 Plataformas</span>
+              </button>
+            </div>
+
+            {/* 🎥 Video MP4 Fluido (MediaRecorder API) */}
+            <div className="col-span-1 md:col-span-2 p-4 rounded-xl bg-gradient-to-r from-teal-950/60 via-zinc-900 to-zinc-900 border border-teal-500/40 hover:border-teal-400 transition shadow-md shadow-teal-950/40 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 rounded-lg bg-teal-500/20 text-teal-300 border border-teal-500/30 shrink-0 mt-0.5">
+                  <Video className="w-5 h-5 text-teal-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sm text-white">Video MP4 Fluido (.mp4)</span>
+                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-teal-500/15 text-teal-300 border border-teal-500/30 font-semibold font-mono">
+                      MediaRecorder API
+                    </span>
+                    <span className="px-2 py-0.5 text-[10px] rounded-full bg-zinc-800 text-zinc-300 font-mono">
+                      {doc.fps} FPS • {doc.width}×{doc.height} px
+                    </span>
+                  </div>
+                  <p className="text-[12px] text-zinc-300 mt-1 leading-relaxed">
+                    Renderiza la animación directamente a un archivo de video <strong className="text-teal-400">MP4 estándar</strong> en alta definición (16 Mbps) usando la API nativa de <strong>MediaRecorder</strong> del navegador, permitiendo una visualización fluida y sin cortes fuera de la aplicación en cualquier reproductor (VLC, QuickTime, móviles, Windows Media Player) y redes sociales.
+                  </p>
+                  <div className="flex items-center gap-2 mt-2.5 text-xs text-zinc-400">
+                    <span className="text-[11px] text-zinc-400 font-medium">Duración / Ciclos en video:</span>
+                    <div className="flex items-center bg-zinc-950 p-0.5 rounded border border-zinc-800 text-[10px]">
+                      <button
+                        onClick={() => setMp4Loops(1)}
+                        className={`px-2 py-0.5 rounded transition cursor-pointer ${
+                          mp4Loops === 1
+                            ? 'bg-teal-500 text-zinc-950 font-bold shadow-xs'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        1 Ciclo ({(doc.totalFrames / doc.fps).toFixed(1)}s)
+                      </button>
+                      <button
+                        onClick={() => setMp4Loops(2)}
+                        className={`px-2 py-0.5 rounded transition cursor-pointer ${
+                          mp4Loops === 2
+                            ? 'bg-teal-500 text-zinc-950 font-bold shadow-xs'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        2 Ciclos ({((doc.totalFrames * 2) / doc.fps).toFixed(1)}s)
+                      </button>
+                      <button
+                        onClick={() => setMp4Loops(4)}
+                        className={`px-2 py-0.5 rounded transition cursor-pointer ${
+                          mp4Loops === 4
+                            ? 'bg-teal-500 text-zinc-950 font-bold shadow-xs'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        4 Ciclos ({((doc.totalFrames * 4) / doc.fps).toFixed(1)}s)
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <button
+                disabled={isExporting}
+                onClick={handleExportMp4}
+                className="w-full sm:w-auto shrink-0 py-2.5 px-4 rounded-lg bg-teal-500 hover:bg-teal-400 text-zinc-950 font-bold text-xs flex items-center justify-center gap-2 transition disabled:opacity-50 cursor-pointer shadow-md shadow-teal-500/20"
+              >
+                <Video className="w-4 h-4" />
+                <span>Renderizar MP4</span>
+              </button>
+            </div>
+
             {/* 1. Animated GIF */}
             <div className="p-4 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-teal-500/40 transition flex flex-col justify-between">
               <div>

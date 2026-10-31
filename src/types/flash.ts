@@ -18,10 +18,43 @@ export type TweenType = 'none' | 'motion' | 'shape';
 export type EasingType = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bounce';
 export type RegistrationPoint = 'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 
+export type MediaAssetType = 'image' | 'audio' | 'video';
+
+export interface MediaFolder {
+  id: string;
+  name: string;
+  parentId?: string | null;
+  color?: string;
+  createdAt: number;
+}
+
+export interface MediaAsset {
+  id: string;
+  name: string;
+  type: MediaAssetType;
+  url: string; // Data URL or object URL
+  folderId?: string | null; // null/undefined for root
+  size?: number; // bytes
+  dimensions?: { width: number; height: number };
+  duration?: number; // seconds (audio/video)
+  mimeType?: string;
+  createdAt: number;
+  thumbnail?: string;
+}
+
+export interface KeyframeSound {
+  assetId: string;
+  name: string;
+  url: string;
+  sync: 'event' | 'stream' | 'stop';
+  loop?: boolean;
+  volume?: number; // 0 to 1
+}
+
 export interface FlashElement {
   id: string;
   name: string;
-  type: 'shape' | 'group' | 'text' | 'button' | 'symbolInstance' | 'threeObject';
+  type: 'shape' | 'group' | 'text' | 'button' | 'symbolInstance' | 'threeObject' | 'image' | 'video';
   shapeType?: 'circle' | 'rect' | 'star' | 'polygon' | 'path';
   x: number;
   y: number;
@@ -58,7 +91,38 @@ export interface FlashElement {
     rotY: number;
     rotZ: number;
   };
+  filters?: ElementFilters;
   actions?: string;
+  motionPath?: MotionPathData;
+  mediaAssetId?: string;
+  mediaUrl?: string;
+}
+
+export interface MotionPathPoint {
+  x: number;
+  y: number;
+}
+
+export interface MotionPathData {
+  enabled: boolean;
+  type: 'quadratic' | 'cubic';
+  cp1: MotionPathPoint;
+  cp2?: MotionPathPoint;
+  autoOrient?: boolean;
+  showFrameTicks?: boolean;
+}
+
+export interface ElementFilters {
+  blur?: number; // in px, e.g. 0 to 50, default 0
+  brightness?: number; // percentage, e.g. 0 to 200, default 100
+  contrast?: number; // percentage, e.g. 0 to 200, default 100
+  dropShadow?: {
+    enabled: boolean;
+    color: string;
+    blur: number; // in px
+    offsetX: number; // in px
+    offsetY: number; // in px
+  };
 }
 
 export interface Keyframe {
@@ -68,7 +132,12 @@ export interface Keyframe {
   prompt?: string;
   actions?: string; // e.g. "stop();", "gotoAndPlay(1);"
   elements: FlashElement[];
+  motionPath?: MotionPathData;
+  motionPaths?: Record<string, MotionPathData>;
+  sound?: KeyframeSound;
 }
+
+export type LayerType = 'normal' | 'background' | 'guide';
 
 export interface Layer {
   id: string;
@@ -77,6 +146,8 @@ export interface Layer {
   locked: boolean;
   color: string;
   keyframes: Keyframe[];
+  layerType?: LayerType;
+  backgroundPresetId?: string;
 }
 
 export interface FlashSymbol {
@@ -108,6 +179,8 @@ export interface FlashDocument {
   backgroundColor: string;
   scenes: FlashScene[];
   symbols: FlashSymbol[];
+  mediaFolders?: MediaFolder[];
+  mediaAssets?: MediaAsset[];
 }
 
 export interface ChatMessage {
@@ -121,3 +194,25 @@ export interface ChatMessage {
     description?: string;
   };
 }
+
+export type OnionSkinMode = 'all' | 'prev' | 'next';
+
+export interface OnionSkinSettings {
+  enabled: boolean;
+  mode: OnionSkinMode;
+  pastFramesCount: number;
+  futureFramesCount: number;
+  baseOpacity: number;
+  pastColor: string;
+  futureColor: string;
+}
+
+export interface CameraViewport {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  active: boolean;
+  isEditing?: boolean;
+}
+

@@ -1,1 +1,57 @@
 @import "tailwindcss";
+
+/* slow studio - Scrollbars en Escala de Grises Elegante */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #121215;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 4px;
+  border: 1px solid #18181b;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+::-webkit-scrollbar-corner {
+  background: #121215;
+}
+
+/* Firefox scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #27272a #121215;
+}
+
+/* Animación de vibración sutil cuando se reproduce la animación (Play) */
+@keyframes playVibration {
+  0% { transform: translateY(0); }
+  25% { transform: translateY(-0.8px) translateX(0.4px); }
+  50% { transform: translateY(0.8px) translateX(-0.4px); }
+  75% { transform: translateY(-0.4px) translateX(-0.4px); }
+  100% { transform: translateY(0); }
+}
+
+@keyframes playPulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.2), inset 0 0 12px rgba(20, 184, 166, 0.04);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(20, 184, 166, 0.45), inset 0 0 16px rgba(20, 184, 166, 0.08);
+  }
+}
+
+.animate-play-vibrate {
+  animation: playVibration 0.12s ease-in-out infinite;
+}
+
+.animate-play-glow {
+  animation: playPulseGlow 1.2s ease-in-out infinite;
+}

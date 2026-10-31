@@ -1,4 +1,5 @@
-import { EasingType, FlashElement, Keyframe, Layer } from '../types/flash';
+import { EasingType, FlashElement, Keyframe, Layer, MotionPathData } from '../types/flash';
+import { evaluateBezierPoint, evaluateBezierTangent } from './motionPathUtils';
 
 export function applyEasing(t: number, easing: EasingType = 'linear'): number {
   switch (easing) {
@@ -89,14 +90,50 @@ export function interpolatePoints(
   return res;
 }
 
-export function interpolateElement(el1: FlashElement, el2: FlashElement, t: number, tweenType: 'motion' | 'shape'): FlashElement {
+export function interpolateElement(
+  el1: FlashElement,
+  el2: FlashElement,
+  t: number,
+  tweenType: 'motion' | 'shape',
+  motionPath?: MotionPathData
+): FlashElement {
+  let posX = lerpNumber(el1.x, el2.x, t);
+  let posY = lerpNumber(el1.y, el2.y, t);
+  let rot = lerpNumber(el1.rotation || 0, el2.rotation || 0, t);
+
+  // If motion path is enabled, calculate position along Bézier curve
+  if (tweenType === 'motion' && motionPath && motionPath.enabled) {
+    const pt = evaluateBezierPoint(
+      { x: el1.x, y: el1.y },
+      motionPath.cp1,
+      { x: el2.x, y: el2.y },
+      motionPath.cp2,
+      t,
+      motionPath.type
+    );
+    posX = pt.x;
+    posY = pt.y;
+
+    if (motionPath.autoOrient) {
+      const tangentAngle = evaluateBezierTangent(
+        { x: el1.x, y: el1.y },
+        motionPath.cp1,
+        { x: el2.x, y: el2.y },
+        motionPath.cp2,
+        t,
+        motionPath.type
+      );
+      rot += tangentAngle;
+    }
+  }
+
   const interpolated: FlashElement = {
     ...el1,
-    x: lerpNumber(el1.x, el2.x, t),
-    y: lerpNumber(el1.y, el2.y, t),
+    x: posX,
+    y: posY,
     width: lerpNumber(el1.width, el2.width, t),
     height: lerpNumber(el1.height, el2.height, t),
-    rotation: lerpNumber(el1.rotation || 0, el2.rotation || 0, t),
+    rotation: rot,
     scaleX: lerpNumber(el1.scaleX ?? 1, el2.scaleX ?? 1, t),
     scaleY: lerpNumber(el1.scaleY ?? 1, el2.scaleY ?? 1, t),
     opacity: lerpNumber(el1.opacity ?? 1, el2.opacity ?? 1, t),
@@ -180,7 +217,12 @@ export function getLayerElementsAtFrame(layer: Layer, frame: number): FlashEleme
       kfNext.elements[i] ||
       el1;
 
-    results.push(interpolateElement(el1, el2, easedT, kfPrev.tweenType));
+    const pathData =
+      (kfPrev.motionPaths && kfPrev.motionPaths[el1.id]) ||
+      kfPrev.motionPath ||
+      el1.motionPath;
+
+    results.push(interpolateElement(el1, el2, easedT, kfPrev.tweenType, pathData));
   }
 
   return results;
